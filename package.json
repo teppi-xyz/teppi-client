@@ -1,0 +1,44 @@
+{
+  "name": "teppi-client",
+  "version": "0.5.1",
+  "description": "Ask the Teppi record about an x402 endpoint before your agent pays it. One GET, and a fetch wrapper that refuses a broken or failing listing before any payment is signed.",
+  "keywords": [
+    "x402",
+    "402",
+    "agent",
+    "payments",
+    "verification",
+    "mcp"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/teppi-xyz/teppi-client"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "rm -rf npm && tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.0"
+  },
+  "files": [
+    "npm",
+    "README.md"
+  ],
+  "publishConfig": {
+    "exports": {
+      ".": "./npm/index.js"
+    },
+    "types": "./npm/index.d.ts"
+  },
+  "homepage": "https://api.teppi.xyz/docs/integrations"
+}
