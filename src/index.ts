@@ -58,7 +58,7 @@ export type CheckOptions = {
 export class TeppiUnreachable extends Error {}
 
 // Named so the record can count checks that came through this client apart from its own gates.
-export const CLIENT_VERSION = '0.5.1';
+export const CLIENT_VERSION = '0.6.0';
 const USER_AGENT = `teppi-client/${CLIENT_VERSION}`;
 
 // One GET. A url the record has never seen is put in line for a free handshake by the asking.
@@ -126,7 +126,44 @@ export type GuardOptions = CheckOptions &
 		readonly payOnDelivery?: boolean;
 		// Put a call bought through Teppi in the public record, bytes and all. Off unless asked for.
 		readonly publish?: boolean;
+		// Refuse a 402 asking more than this many times what the endpoint's last 402 asked, or false.
+		readonly maxOverUsual?: number | false;
 	};
+
+// A seller can name any amount in a 402 and a client signs it, so a spike past this is refused.
+export const MAX_OVER_USUAL = 5;
+
+export type Requirement = {
+	readonly amount?: string;
+	readonly maxAmountRequired?: string;
+	readonly asset?: string;
+};
+
+type Advertised = { readonly atomic?: string | null; readonly asset?: string };
+
+// The asked and usual amounts in one token's smallest unit, or null when they cannot be compared.
+function comparable(answer: Answer, requirement: Requirement): [bigint, bigint] | null {
+	const seen = (answer.observed as { advertised?: Advertised | null } | undefined)?.advertised;
+	const asked = requirement.amount ?? requirement.maxAmountRequired;
+	if (!seen?.atomic || !seen.asset || asked === undefined || !/^\d+$/.test(asked)) return null;
+	// Decimals differ by token, so two amounts are compared only when they name the same one.
+	if (requirement.asset?.toLowerCase() !== seen.asset.toLowerCase()) return null;
+	const usual = BigInt(seen.atomic);
+	return usual === 0n ? null : [BigInt(asked), usual];
+}
+
+// Why a requirement asks too much against the record's last price, or null when it does not.
+export function overUsual(
+	answer: Answer,
+	requirement: Requirement,
+	times = MAX_OVER_USUAL,
+): string | null {
+	const pair = comparable(answer, requirement);
+	if (pair === null) return null;
+	const [asked, usual] = pair;
+	if (asked * 100n <= usual * BigInt(Math.round(times * 100))) return null;
+	return `asks ${asked}, more than ${times} times the ${usual} its last 402 asked`;
+}
 
 export const PUBLISH_HEADER = 'x-teppi-publish';
 
@@ -206,6 +243,8 @@ export function beforeYouPay(inner: typeof fetch, options: GuardOptions = {}): t
 		}
 		const decision = policy(answer, request);
 		if (!decision.allow) return refused(request.url, decision.because, answer);
+		const spike = await everyOptionOver(response, answer, options.maxOverUsual);
+		if (spike !== null) return refused(request.url, spike, answer);
 		if (options.payOnDelivery !== true || answer.buy === undefined) return response;
 		const key = `${request.method} ${request.url}`;
 		return (await quoteFrom(answer.buy, input, init, key)) ?? response;
@@ -221,6 +260,26 @@ export function beforeYouPay(inner: typeof fetch, options: GuardOptions = {}): t
 		const response = await inner(input, init);
 		return response.status === 402 ? judge(response, input, init) : response;
 	};
+}
+
+// The client picks among a 402's options later, so the fetch refuses only when every one is over.
+async function everyOptionOver(
+	response: Response,
+	answer: Answer,
+	times: number | false = MAX_OVER_USUAL,
+): Promise<string | null> {
+	if (times === false) return null;
+	const header = response.headers.get('payment-required');
+	let terms: { accepts?: Requirement[] } | null = null;
+	try {
+		terms = header === null ? await response.clone().json() : JSON.parse(atob(header));
+	} catch {
+		return null;
+	}
+	const options = terms?.accepts ?? [];
+	if (options.length === 0) return null;
+	const reasons = options.map((o) => overUsual(answer, o, times));
+	return reasons.every((r) => r !== null) ? (reasons[0] as string) : null;
 }
 
 function refused(url: string, because: string, answer: Answer | null): Response {
@@ -247,7 +306,7 @@ export function teppiHook(options: GuardOptions = {}) {
 	const policy = options.policy ?? defaultPolicy(options);
 	return async (context: {
 		paymentRequired: { resource: { url: string } };
-		selectedRequirements: { payTo: string };
+		selectedRequirements: { payTo: string } & Requirement;
 	}): Promise<undefined | { abort: true; reason: string }> => {
 		const url = context.paymentRequired.resource.url;
 		let answer: Answer;
@@ -258,7 +317,71 @@ export function teppiHook(options: GuardOptions = {}) {
 			return { abort: true, reason: `the record could not be reached: ${(err as Error).message}` };
 		}
 		const decision = policy(answer, { url, method: options.method ?? 'GET' });
-		return decision.allow ? undefined : { abort: true, reason: decision.because };
+		if (!decision.allow) return { abort: true, reason: decision.because };
+		const spike =
+			options.maxOverUsual === false
+				? null
+				: overUsual(answer, context.selectedRequirements, options.maxOverUsual ?? MAX_OVER_USUAL);
+		return spike === null ? undefined : { abort: true, reason: spike };
+	};
+}
+
+// One tool an agent framework can register: a name, a JSON schema and the call behind it.
+export type CheckTool = {
+	readonly name: 'check_before_paying';
+	readonly description: string;
+	readonly parameters: {
+		readonly type: 'object';
+		readonly properties: Record<string, unknown>;
+		required: string[];
+		readonly additionalProperties: false;
+	};
+	readonly execute: (args: { url: string; method: 'GET' | 'POST' }) => Promise<ToolAnswer>;
+};
+
+export type ToolAnswer = {
+	readonly pay: boolean;
+	readonly because: string;
+	readonly band: Answer['band'];
+	readonly why: string;
+	readonly defects: readonly Defect[];
+	readonly buy: Buy | null;
+	readonly reproduce: string | null;
+};
+
+// Written for the model reading it: when to call it, and what the answer means.
+const TOOL_DESCRIPTION =
+	'Call before paying any HTTP 402 endpoint. Returns whether to pay it, why, its grade from paid ' +
+	'calls (UNRATED means not enough is known, never bad), what is wrong with its listing, and a way ' +
+	'to buy it charged only if the answer passes.';
+
+export function checkTool(options: GuardOptions = {}): CheckTool {
+	const policy = options.policy ?? defaultPolicy(options);
+	return {
+		name: 'check_before_paying',
+		description: TOOL_DESCRIPTION,
+		parameters: {
+			type: 'object',
+			properties: {
+				url: { type: 'string', description: 'the url that answered 402' },
+				method: { type: 'string', enum: ['GET', 'POST'], description: 'the verb you will pay for' },
+			},
+			required: ['url', 'method'],
+			additionalProperties: false,
+		},
+		execute: async ({ url, method }) => {
+			const answer = await check(url, { ...options, method });
+			const decision = policy(answer, { url, method });
+			return {
+				pay: decision.allow,
+				because: decision.allow ? 'nothing on record against it' : decision.because,
+				band: answer.band,
+				why: answer.why,
+				defects: answer.defects,
+				buy: answer.buy ?? null,
+				reproduce: answer.reproduce,
+			};
+		},
 	};
 }
 

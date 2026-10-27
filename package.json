@@ -1,6 +1,6 @@
 {
   "name": "teppi-client",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Ask the Teppi record about an x402 endpoint before your agent pays it. One GET, and a fetch wrapper that refuses a broken or failing listing before any payment is signed.",
   "keywords": [
     "x402",

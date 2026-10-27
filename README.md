@@ -44,6 +44,16 @@ only what has been graded, `{ minBand: 'B' }` to raise the line, or your own
 `policy(answer, request)`. When the record cannot be reached the payment goes ahead unless you
 pass `{ whenUnreachable: 'refuse' }`.
 
+A seller can name any amount in a 402, and a client signs what it is asked. Both also refuse a
+402 asking more than five times what the endpoint's own last 402 asked, in the same token,
+compared in its smallest unit: a spending cap limits a loss, this stops the spike. Set
+`{ maxOverUsual: 2 }` to tighten it or `{ maxOverUsual: false }` to turn it off. `beforeYouPay`
+refuses only when every option in the 402 is over, since the client picks among them later.
+
+`checkTool()` is the same check as one tool for an agent framework, with a name, a JSON schema and
+`execute({ url, method })`; snippets for the Vercel AI SDK, the OpenAI Agents SDK and LangChain are
+at https://api.teppi.xyz/docs/integrations.
+
 A url the record has never seen is put in line for a free handshake by the asking, so the second
 answer carries what it said. Every answer names `npx teppi-check <url>`, which runs the same
 handshake from your own machine, and `payee` says what the record knows about whoever gets paid
