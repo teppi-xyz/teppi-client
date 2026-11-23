@@ -36,6 +36,16 @@ A purchase answers with `x-teppi-order`, a `Link` to its signed receipt, and `x-
 nothing else, and `commitmentOf(salt, bytes)` shows anyone that the bytes you got are the ones
 the receipt is bound to, without the record ever holding them in public.
 
+`verifyScorecard(card, keys)` checks a grade card from `/v1/trust/{id}` against the key that signs
+cards. To rerun the grade itself from public evidence, use `npx teppi-check verify <cap_id>`.
+
+When Teppi chooses the seller for you (`/v1/chat/completions`, `/v1/figures/company`), the plan
+receipt carries what the rule saw as `plan.routing`: each seller's price, calls and lower bound, who
+was short of evidence and who was left out. `explainOrder(orderId)` reads that receipt and
+`/v1/market/records` as of its instant, recounts every figure with the same rule the router runs
+(`rankSellers`, `triesFrom`, held to the router's own by a property test), and says `same` or
+`DIFF` for each, so the choice rests on the public file and not on Teppi's word.
+
 `teppiHook` reads the resource url and the payee off the 402 the client is about to pay and
 returns `{ abort: true, reason }` when the policy refuses. `beforeYouPay` does the same for a
 client that only knows fetch. The default policy refuses a listing the record says is broken and
@@ -53,6 +63,26 @@ refuses only when every option in the 402 is over, since the client picks among 
 `checkTool()` is the same check as one tool for an agent framework, with a name, a JSON schema and
 `execute({ url, method })`; snippets for the Vercel AI SDK, the OpenAI Agents SDK and LangChain are
 at https://api.teppi.xyz/docs/integrations.
+
+`teppiConfirm()` is the confirmation callback Cloudflare's Agents SDK asks before `withX402Client`
+pays an MCP tool. The SDK hands it the payment terms and no url, so it refuses a payee whose paid
+calls settled with nothing usable back, and checks the server's own url when you pass `{ server }`.
+`refusedPayouts()` is that list on its own, read once and kept for ten minutes. For Python and
+Amazon Bedrock AgentCore, `pip install teppi-client` gives the same rules as AgentCore's
+`pre_sign_policy`.
+
+`payeeWatch()` tells you when someone your agent already paid lands on that list later. Pass it
+as `watch` to `teppiHook` or `teppiConfirm` and every payee they let through is remembered; it reads
+`/v1/policy/payouts` every fifteen minutes and calls `onChange` only when a payee joins or leaves,
+with why (`kept` money for nothing, or mostly `wrong` answers) and the evidence. No server, webhook
+or account is needed.
+
+```ts
+import { payeeWatch, teppiHook } from 'teppi-client';
+
+const watch = payeeWatch({ onChange: (c) => console.warn('payee changed', c) });
+client.onBeforePaymentCreation(teppiHook({ watch }));
+```
 
 A url the record has never seen is put in line for a free handshake by the asking, so the second
 answer carries what it said. Every answer names `npx teppi-check <url>`, which runs the same

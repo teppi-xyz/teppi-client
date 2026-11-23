@@ -1,5 +1,7 @@
 // What an agent asks before it pays, and a fetch that asks it for the agent at the 402.
 
+import type { PayeeWatch } from './watch.ts';
+
 export const DEFAULT_ORIGIN = 'https://api.teppi.xyz';
 
 export type Defect = { readonly defect: string; readonly says: string };
@@ -58,7 +60,7 @@ export type CheckOptions = {
 export class TeppiUnreachable extends Error {}
 
 // Named so the record can count checks that came through this client apart from its own gates.
-export const CLIENT_VERSION = '0.6.0';
+export const CLIENT_VERSION = '0.10.0';
 const USER_AGENT = `teppi-client/${CLIENT_VERSION}`;
 
 // One GET. A url the record has never seen is put in line for a free handshake by the asking.
@@ -128,6 +130,8 @@ export type GuardOptions = CheckOptions &
 		readonly publish?: boolean;
 		// Refuse a 402 asking more than this many times what the endpoint's last 402 asked, or false.
 		readonly maxOverUsual?: number | false;
+		// Remembers every payee this client lets through, to report when one gets listed.
+		readonly watch?: PayeeWatch;
 	};
 
 // A seller can name any amount in a 402 and a client signs it, so a spike past this is refused.
@@ -322,7 +326,92 @@ export function teppiHook(options: GuardOptions = {}) {
 			options.maxOverUsual === false
 				? null
 				: overUsual(answer, context.selectedRequirements, options.maxOverUsual ?? MAX_OVER_USUAL);
-		return spike === null ? undefined : { abort: true, reason: spike };
+		if (spike !== null) return { abort: true, reason: spike };
+		options.watch?.add(context.selectedRequirements.payTo);
+		return undefined;
+	};
+}
+
+// Payouts where paid calls settled with nothing usable back, read once and kept for ten minutes.
+export function refusedPayouts(
+	options: {
+		readonly origin?: string;
+		readonly fetchImpl?: typeof fetch;
+		readonly ttlMs?: number;
+	} = {},
+): (address: string) => Promise<boolean> {
+	let read: { at: number; set: ReadonlySet<string> } | null = null;
+	return async (address) => {
+		if (read === null || Date.now() - read.at > (options.ttlMs ?? 600_000)) {
+			const origin = options.origin ?? DEFAULT_ORIGIN;
+			const response = await (options.fetchImpl ?? fetch)(
+				`${origin}/v1/policy/payouts?format=plain`,
+				{ headers: { 'user-agent': USER_AGENT }, signal: AbortSignal.timeout(5000) },
+			);
+			if (!response.ok) throw new TeppiUnreachable(`the record answered ${response.status}`);
+			const lines = (await response.text()).split(/\s+/).filter((l) => l !== '');
+			read = { at: Date.now(), set: new Set(lines.map((l) => l.toLowerCase())) };
+		}
+		return read.set.has(address.toLowerCase());
+	};
+}
+
+export type ConfirmOptions = GuardOptions & {
+	// The MCP server the tool lives on, checked as a url beside who gets paid.
+	readonly server?: string;
+	readonly onRefuse?: (because: string) => void;
+};
+
+// Why one payment option should not be paid, or null when nothing the record holds says so.
+async function refusal(
+	req: { payTo?: string } & Requirement,
+	options: ConfirmOptions,
+	policy: Policy,
+	kept: (address: string) => Promise<boolean>,
+): Promise<string | null> {
+	if (req.payTo !== undefined && (await kept(req.payTo))) {
+		return `${req.payTo} kept payments for nothing usable`;
+	}
+	if (options.server === undefined) return null;
+	const answer = await check(options.server, {
+		...options,
+		...(req.payTo === undefined ? {} : { payTo: req.payTo }),
+	});
+	const decision = policy(answer, { url: options.server, method: 'POST' });
+	if (!decision.allow) return decision.because;
+	if (options.maxOverUsual === false) return null;
+	return overUsual(answer, req, options.maxOverUsual ?? MAX_OVER_USUAL);
+}
+
+function remember(watch: PayeeWatch | undefined, requirements: readonly { payTo?: string }[]) {
+	for (const req of requirements) if (req.payTo !== undefined) watch?.add(req.payTo);
+}
+
+// The confirmation Cloudflare's Agents SDK asks for before paying a tool, which sees terms only.
+export function teppiConfirm(
+	options: ConfirmOptions = {},
+): (requirements: readonly ({ payTo?: string } & Requirement)[]) => Promise<boolean> {
+	const policy = options.policy ?? defaultPolicy(options);
+	const kept = refusedPayouts(options);
+	const no = (because: string): false => {
+		options.onRefuse?.(because);
+		return false;
+	};
+	return async (requirements) => {
+		if (requirements.length === 0) return no('the tool named nothing to pay');
+		// The SDK pays one of these, so every one it could pay must pass.
+		for (const req of requirements) {
+			let because: string | null;
+			try {
+				because = await refusal(req, options, policy, kept);
+			} catch (err) {
+				if (options.whenUnreachable !== 'refuse') continue;
+				because = `the record could not be reached: ${(err as Error).message}`;
+			}
+			if (because !== null) return no(because);
+		}
+		remember(options.watch, requirements);
+		return true;
 	};
 }
 
@@ -467,6 +556,14 @@ async function verifySigned(
 // Checks an answer against the published keys, so what Teppi said can be shown to a principal.
 export async function verify(answer: Answer, keys: PublishedKeys): Promise<Verified> {
 	return verifySigned(answer, keys, 'check', 'answer');
+}
+
+// Verify a grade card. Cards are signed with the key that has no purpose field.
+export async function verifyScorecard(
+	card: Record<string, unknown>,
+	keys: PublishedKeys,
+): Promise<Verified> {
+	return verifySigned(card, keys, null, 'card');
 }
 
 // The receipt at /v1/orders/{id}: what was quoted, paid, bought and checked, and never the bytes.
@@ -701,6 +798,27 @@ export function captureRequest(
 }
 
 export {
+	DELIVERY_CORE,
+	type DeliveryCore,
+	type DeliveryInput,
+	deliveryCore,
+	deliveryCoreId,
+	sha256Hex,
+} from './delivery.ts';
+export { type DisputeBytes, type DisputeEvidence, disputeEvidence } from './dispute.ts';
+export {
+	explainOrder,
+	type RecordLine,
+	type Rerun,
+	ROUTING_RULE,
+	type RoutingSnapshot,
+	rankSellers,
+	rerunRouting,
+	seenIn,
+	triesFrom,
+	wilsonLower,
+} from './routing.ts';
+export {
 	DELIVERY_TAG,
 	digestMatches,
 	type Jwk,
@@ -714,3 +832,4 @@ export {
 	verifyBase,
 	verifySellerSignature,
 } from './signed.ts';
+export { type PayeeChange, type PayeeWatch, payeeWatch, WATCH_INTERVAL_MS } from './watch.ts';

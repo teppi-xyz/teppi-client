@@ -1,11 +1,14 @@
 {
   "name": "teppi-client",
-  "version": "0.6.0",
-  "description": "Ask the Teppi record about an x402 endpoint before your agent pays it. One GET, and a fetch wrapper that refuses a broken or failing listing before any payment is signed.",
+  "version": "0.10.0",
+  "description": "Check an x402 seller before your agent pays it: one GET to the Teppi record of what paying it delivered, a fetch wrapper that refuses a failing listing or an overcharge before signing, and pay only on delivery.",
   "keywords": [
     "x402",
-    "402",
-    "agent",
+    "http-402",
+    "check-before-paying",
+    "x402-seller",
+    "pay-on-delivery",
+    "agents",
     "payments",
     "verification",
     "mcp"
